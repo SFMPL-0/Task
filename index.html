@@ -895,6 +895,8 @@ async function enterApp(){
   document.getElementById('app').classList.add('on');
   renderSidebar();
   nav('dashboard');
+  // Run cleanup silently after UI is visible
+  setTimeout(autoCleanupVerifiedTasks, 1500);
 }
 
 async function restoreSession(){
@@ -918,6 +920,7 @@ async function restoreSession(){
     document.getElementById('app').classList.add('on');
     renderSidebar();
     nav('dashboard');
+    setTimeout(autoCleanupVerifiedTasks, 1500);
   }catch(e){
     document.getElementById('load-screen').classList.remove('on');
     document.getElementById('login-page').style.display='flex';
@@ -1457,7 +1460,9 @@ function renderWF(t,u){
   }
 
   if(['superadmin','admin','subadmin'].includes(role)&&t.status==='Completed'){
-    const ok=role!=='subadmin'||t.assigned_to===u.id;
+    // superadmin & admin can verify ANY completed task
+    // subadmin can only verify tasks assigned through them
+    const ok = ['superadmin','admin'].includes(role) || (role==='subadmin'&&t.assigned_to===u.id);
     if(ok) h=`<div class="wbar">
       <span class="wbar-lbl">Review completed task</span>
       <div class="wbar-acts">
@@ -1731,6 +1736,9 @@ async function saveSelf(){
 // ══════════════════════════════════════════════════════
 //  USERS PAGE
 // ══════════════════════════════════════════════════════
+// SuperAdmin user-task filter state
+let UFilt = { userId: '', status: '', type: '' };
+
 function renderUsers(){
   if(!['superadmin','admin'].includes(CU.role)){
     document.getElementById('pg-users').innerHTML='<div class="empty"><div class="empty-ic">🔒</div><div class="empty-t">Access Denied</div></div>';
@@ -1745,11 +1753,11 @@ function renderUsers(){
     subadmin:{lbl:'Sub Admins', c:'var(--purple)'},
     user:    {lbl:'Users',      c:'var(--teal)'}
   };
-
-  // Stats
-  const total=allTasks().length;
   const active=users.filter(u=>u.active).length;
   const inactive=users.filter(u=>!u.active).length;
+
+  // Build user options for the task-filter dropdown (all users except current)
+  const allUsersOpts=users.map(u=>`<option value="${u.id}">${u.name} (${RL[u.role]})</option>`).join('');
 
   document.getElementById('pg-users').innerHTML=`
   <div class="stat-grid" style="grid-template-columns:repeat(3,1fr)">
@@ -1757,9 +1765,43 @@ function renderUsers(){
     <div class="stat"><div class="stat-stripe green"></div><div class="stat-header"><div><div class="stat-v">${active}</div><div class="stat-l">Active</div></div></div></div>
     <div class="stat"><div class="stat-stripe red"></div><div class="stat-header"><div><div class="stat-v">${inactive}</div><div class="stat-l">Inactive</div></div></div></div>
   </div>
+
+  ${isSA?`
+  <!-- ── USER TASK INSPECTOR (SuperAdmin only) ── -->
+  <div class="scard">
+    <div class="shead">
+      <span class="stitle"><span class="stitle-accent"></span>User Task Inspector</span>
+      <span style="font-size:10px;color:var(--t3)">View tasks by individual user</span>
+    </div>
+    <div class="fbar" style="border-bottom:none;padding-bottom:0">
+      <select id="uf-user" onchange="UFilt.userId=this.value;renderUserTasks()" style="min-width:180px">
+        <option value="">— Select a user —</option>
+        ${allUsersOpts}
+      </select>
+      <select id="uf-status" onchange="UFilt.status=this.value;renderUserTasks()">
+        <option value="">All Statuses</option>
+        <option value="Created">Created</option>
+        <option value="Assigned">Assigned</option>
+        <option value="In Progress">In Progress</option>
+        <option value="Completed">Completed</option>
+        <option value="Verified">Verified</option>
+        <option value="Rejected">Rejected</option>
+      </select>
+      <select id="uf-type" onchange="UFilt.type=this.value;renderUserTasks()">
+        <option value="">All Types</option>
+        <option value="Daily">Daily</option>
+        <option value="Weekly">Weekly</option>
+        <option value="Monthly">Monthly</option>
+      </select>
+      <button class="fbtn" onclick="UFilt={userId:'',status:'',type:''};document.getElementById('uf-user').value='';document.getElementById('uf-status').value='';document.getElementById('uf-type').value='';renderUserTasks()">↺ Reset</button>
+    </div>
+    <div id="user-task-panel" style="padding:0 18px 14px"></div>
+  </div>`:''}
+
   <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
     ${isSA?`<button class="btn bg-" onclick="openAddUser()">＋ Add User</button>`:''}
   </div>
+
   ${Object.entries(byRole).map(([role,list])=>`
   <div class="scard">
     <div class="shead">
@@ -1770,24 +1812,95 @@ function renderUsers(){
       </span>
     </div>
     <div class="sbody">
-      ${list.length?list.map(u=>`
-      <div class="ucard">
-        <div class="uav" style="background:${u.color}22;color:${u.color};border:1.5px solid ${u.color}33">${u.avatar}</div>
-        <div class="uinfo">
-          <div class="uname">${u.name} ${!u.active?'<span class="bdg b-rd btn-xs">Inactive</span>':''}</div>
-          <div class="uemail">${u.email}</div>
-        </div>
-        <div style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace;min-width:50px;text-align:right">
-          ${allTasks().filter(t=>t.assigned_to_user===u.id||t.created_by===u.id).length} tasks
-        </div>
-        ${isSA?`<div class="uacts">
-          <button class="btn bp btn-xs" onclick="openEditUser(${u.id})">✎ Edit</button>
-          <button class="btn bo btn-xs" onclick="doToggleUser(${u.id})">${u.active?'Deactivate':'Activate'}</button>
-          <button class="btn bd btn-xs" onclick="doRemoveUser(${u.id})">⊗</button>
-        </div>`:''}
-      </div>`).join(''):`<div style="color:var(--t3);font-size:12px;padding:8px 0">No ${rc[role].lbl} yet.</div>`}
+      ${list.length?list.map(u=>{
+        const uTasks=allTasks().filter(t=>t.assigned_to_user===u.id||t.assigned_to===u.id||t.created_by===u.id);
+        const uDone=uTasks.filter(t=>t.status==='Verified').length;
+        const uOv=uTasks.filter(t=>overdue(t)).length;
+        const uPend=uTasks.filter(t=>['Created','Assigned','In Progress'].includes(t.status)).length;
+        return `<div class="ucard" onclick="${isSA?`UFilt.userId='${u.id}';document.getElementById('uf-user').value='${u.id}';renderUserTasks();document.getElementById('user-task-panel').scrollIntoView({behavior:'smooth'})`:''}" style="${isSA?'cursor:pointer':''}" title="${isSA?'Click to view tasks':''}">
+          <div class="uav" style="background:${u.color}22;color:${u.color};border:1.5px solid ${u.color}33">${u.avatar}</div>
+          <div class="uinfo">
+            <div class="uname">${u.name} ${!u.active?'<span class="bdg b-rd btn-xs">Inactive</span>':''}</div>
+            <div class="uemail">${u.email}</div>
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;flex-shrink:0">
+            <div style="text-align:center">
+              <div style="font-size:14px;font-weight:700;color:var(--t);font-family:'DM Mono',monospace">${uTasks.length}</div>
+              <div style="font-size:9px;color:var(--t3);text-transform:uppercase">Total</div>
+            </div>
+            <div style="text-align:center">
+              <div style="font-size:14px;font-weight:700;color:var(--green);font-family:'DM Mono',monospace">${uDone}</div>
+              <div style="font-size:9px;color:var(--t3);text-transform:uppercase">Done</div>
+            </div>
+            <div style="text-align:center">
+              <div style="font-size:14px;font-weight:700;color:var(--amber);font-family:'DM Mono',monospace">${uPend}</div>
+              <div style="font-size:9px;color:var(--t3);text-transform:uppercase">Pending</div>
+            </div>
+            ${uOv?`<div style="text-align:center">
+              <div style="font-size:14px;font-weight:700;color:var(--red);font-family:'DM Mono',monospace">${uOv}</div>
+              <div style="font-size:9px;color:var(--t3);text-transform:uppercase">Overdue</div>
+            </div>`:''}
+          </div>
+          ${isSA?`<div class="uacts">
+            <button class="btn bp btn-xs" onclick="event.stopPropagation();openEditUser(${u.id})">✎ Edit</button>
+            <button class="btn bo btn-xs" onclick="event.stopPropagation();doToggleUser(${u.id})">${u.active?'Deactivate':'Activate'}</button>
+            <button class="btn bd btn-xs" onclick="event.stopPropagation();doRemoveUser(${u.id})">⊗</button>
+          </div>`:''}
+        </div>`;
+      }).join(''):`<div style="color:var(--t3);font-size:12px;padding:8px 0">No ${rc[role].lbl} yet.</div>`}
     </div>
   </div>`).join('')}`;
+
+  // Restore filter state if a user was already selected
+  if(UFilt.userId){
+    const ufEl=document.getElementById('uf-user');
+    if(ufEl) ufEl.value=UFilt.userId;
+    const usEl=document.getElementById('uf-status');
+    if(usEl) usEl.value=UFilt.status;
+    const utEl=document.getElementById('uf-type');
+    if(utEl) utEl.value=UFilt.type;
+    renderUserTasks();
+  }
+}
+
+function renderUserTasks(){
+  const panel=document.getElementById('user-task-panel');
+  if(!panel) return;
+  const uid=parseInt(UFilt.userId);
+  if(!uid){ panel.innerHTML='<div style="color:var(--t3);font-size:12px;padding:14px 0">Select a user above to inspect their tasks.</div>'; return; }
+
+  const u=allUsers().find(x=>x.id===uid);
+  if(!u){ panel.innerHTML=''; return; }
+
+  // All tasks related to this user: assigned_to, assigned_to_user, or created_by
+  let tasks=allTasks().filter(t=>t.assigned_to_user===uid||t.assigned_to===uid||t.created_by===uid);
+  if(UFilt.status) tasks=tasks.filter(t=>t.status===UFilt.status);
+  if(UFilt.type)   tasks=tasks.filter(t=>t.type===UFilt.type);
+  tasks.sort((a,b)=>{
+    const p={High:0,Medium:1,Low:2};
+    return p[a.priority]-p[b.priority]||new Date(a.due_date)-new Date(b.due_date);
+  });
+
+  const total=tasks.length;
+  const done=tasks.filter(t=>t.status==='Verified').length;
+  const pend=tasks.filter(t=>['Created','Assigned','In Progress'].includes(t.status)).length;
+  const ov=tasks.filter(t=>overdue(t)).length;
+
+  panel.innerHTML=`
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 0 10px;border-bottom:1px solid var(--border);margin-bottom:12px">
+      <div class="uav" style="background:${u.color}22;color:${u.color};border:1.5px solid ${u.color}33;width:36px;height:36px;font-size:13px">${u.avatar}</div>
+      <div style="flex:1">
+        <div style="font-size:13px;font-weight:600;color:var(--t)">${u.name}</div>
+        <div style="font-size:11px;color:var(--t3)">${u.email} · ${RL[u.role]}</div>
+      </div>
+      <div style="display:flex;gap:14px">
+        <div style="text-align:center"><div style="font-size:18px;font-weight:700;color:var(--t);font-family:'DM Mono',monospace">${total}</div><div style="font-size:9px;color:var(--t3);text-transform:uppercase">Total</div></div>
+        <div style="text-align:center"><div style="font-size:18px;font-weight:700;color:var(--green);font-family:'DM Mono',monospace">${done}</div><div style="font-size:9px;color:var(--t3);text-transform:uppercase">Verified</div></div>
+        <div style="text-align:center"><div style="font-size:18px;font-weight:700;color:var(--amber);font-family:'DM Mono',monospace">${pend}</div><div style="font-size:9px;color:var(--t3);text-transform:uppercase">Pending</div></div>
+        <div style="text-align:center"><div style="font-size:18px;font-weight:700;color:var(--red);font-family:'DM Mono',monospace">${ov}</div><div style="font-size:9px;color:var(--t3);text-transform:uppercase">Overdue</div></div>
+      </div>
+    </div>
+    ${tasks.length?tasks.map(t=>taskCard(t)).join(''):`<div class="empty" style="padding:20px"><div class="empty-ic">◈</div><div class="empty-t">No tasks match this filter</div></div>`}`;
 }
 
 function openAddUser(){
@@ -2009,6 +2122,30 @@ document.addEventListener('click',e=>{
 document.querySelectorAll('.moverlay').forEach(o=>o.addEventListener('click',e=>{ if(e.target===o) o.classList.remove('on'); }));
 
 // ══════════════════════════════════════════════════════
+//  AUTO-CLEANUP: Delete Verified tasks older than 7 days
+//  Runs once on login. SuperAdmin/Admin only to avoid
+//  permission errors on anon key.
+// ══════════════════════════════════════════════════════
+async function autoCleanupVerifiedTasks(){
+  if(!['superadmin','admin'].includes(CU?.role)) return;
+  const cutoff=new Date();
+  cutoff.setDate(cutoff.getDate()-7);
+  const cutoffStr=cutoff.toISOString();
+  const {data:old}=await sb.from('tasks')
+    .select('id')
+    .eq('status','Verified')
+    .lt('verified_at',cutoffStr);
+  if(!old||!old.length) return;
+  const ids=old.map(t=>t.id);
+  // Delete comments first (cascade should handle it, but be safe)
+  await sb.from('comments').delete().in('task_id',ids);
+  const {error}=await sb.from('tasks').delete().in('id',ids);
+  if(!error && ids.length){
+    toast(`🗑 Auto-cleaned ${ids.length} verified task${ids.length>1?'s':''} older than 7 days`,'in');
+  }
+}
+
+// ══════════════════════════════════════════════════════
 //  BOOT
 // ══════════════════════════════════════════════════════
 restoreSession();
@@ -2019,7 +2156,8 @@ Object.assign(window,{
   doAssignSub, doAssignDirect, doAssignUser, confirmComplete, confirmVerify,
   openReject, confirmReject, doResubmit, doDelete, postCmt,
   toggleNotif, markAllRead, markRead, switchMTab, doLogin, logout,
-  closeM, TF, renderTasks, toggleTheme, doChangePassword
+  closeM, TF, UFilt, renderTasks, renderUsers, renderUserTasks,
+  toggleTheme, doChangePassword, autoCleanupVerifiedTasks
 });
 </script>
 </body>
