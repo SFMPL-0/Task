@@ -170,6 +170,15 @@ html,body{height:100%;overflow:hidden;font-family:'DM Sans',sans-serif;backgroun
 .btn-login:disabled{opacity:.55;cursor:not-allowed;transform:none}
 .lnote{text-align:center;font-size:11px;color:var(--t4)}
 
+/* ── REALTIME INDICATOR ── */
+.rt-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;cursor:help;transition:background .3s}
+.rt-dot.connected{background:var(--green);box-shadow:0 0 5px var(--green)}
+.rt-dot.connecting{background:var(--amber);animation:rt-pulse .8s infinite alternate}
+.rt-dot.disconnected{background:var(--red)}
+@keyframes rt-pulse{from{opacity:.4}to{opacity:1}}
+#rt-pop{position:fixed;bottom:70px;right:22px;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--r);padding:8px 14px;font-size:11px;color:var(--t2);box-shadow:var(--shadow2);opacity:0;transform:translateY(8px);transition:all .25s;pointer-events:none;z-index:888;max-width:280px}
+#rt-pop.on{opacity:1;transform:none}
+
 /* ══════════════════════════════════════════
    APP SHELL
 ══════════════════════════════════════════ */
@@ -580,6 +589,7 @@ textarea{resize:vertical;min-height:76px}
         <span class="page-title" id="page-title">Dashboard</span>
       </div>
       <div class="tb-r">
+        <div class="rt-dot connecting" id="rt-ind" title="Connecting to live updates…"></div>
         <button class="btn-new" id="btn-new" onclick="openCreateTask()">＋ New Task</button>
         <div class="icon-btn" onclick="toggleNotif()" title="Notifications">
           🔔<span class="notif-dot" id="notif-dot"></span>
@@ -604,6 +614,8 @@ textarea{resize:vertical;min-height:76px}
     </div>
   </div>
 </div>
+
+<div id="rt-pop"></div>
 
 <!-- ═══════════════════════════════════════
      MODALS
@@ -879,13 +891,137 @@ async function doLogin(){
   enterApp();
 }
 
+// ══════════════════════════════════════════════════════
+//  REALTIME SUBSCRIPTIONS
+// ══════════════════════════════════════════════════════
+let realtimeChannel = null;
+let _rtConnected = false;
+let _pollTimer = null;
+let _rtPopTimer = null;
+
 function logout(){
   CU = null;
+  _rtConnected=false;
+  stopPolling();
+  if(realtimeChannel){ try{ sb.removeChannel(realtimeChannel); }catch(e){} realtimeChannel=null; }
   try{ sessionStorage.removeItem('tf_s'); }catch(e){}
   document.getElementById('app').classList.remove('on');
   document.getElementById('login-page').style.display='flex';
   toast('Signed out','in');
 }
+
+function setupRealtime(){
+  // Clean up old channel if exists
+  if(realtimeChannel){ sb.removeChannel(realtimeChannel); realtimeChannel=null; }
+
+  realtimeChannel = sb.channel('taskflow-live')
+    // ── Tasks: any INSERT / UPDATE / DELETE ──
+    .on('postgres_changes',{event:'INSERT',schema:'public',table:'tasks'},async payload=>{
+      const exists=C.tasks.find(t=>t.id===payload.new.id);
+      if(!exists){ C.tasks.unshift(payload.new); }
+      renderPage(curPage); updateBadges();
+      showRealtimePop('📋 New task added');
+    })
+    .on('postgres_changes',{event:'UPDATE',schema:'public',table:'tasks'},async payload=>{
+      const idx=C.tasks.findIndex(t=>t.id===payload.new.id);
+      if(idx!==-1) C.tasks[idx]=payload.new; else C.tasks.unshift(payload.new);
+      // If task detail is open for this task, refresh it
+      if(curTaskId===payload.new.id){
+        document.getElementById('detail-title').textContent=payload.new.title;
+        renderDetail(payload.new);
+      }
+      renderPage(curPage); updateBadges();
+      showRealtimePop('✏️ Task updated: '+payload.new.title);
+    })
+    .on('postgres_changes',{event:'DELETE',schema:'public',table:'tasks'},payload=>{
+      C.tasks=C.tasks.filter(t=>t.id!==payload.old.id);
+      if(curTaskId===payload.old.id) closeM('modal-detail');
+      renderPage(curPage); updateBadges();
+    })
+    // ── Comments: INSERT (new comments appear live) ──
+    .on('postgres_changes',{event:'INSERT',schema:'public',table:'comments'},async payload=>{
+      const c=payload.new;
+      const exists=C.comments.find(x=>x.id===c.id);
+      if(!exists){ C.comments.push(c); }
+      // If the related task detail modal is open, refresh it
+      if(curTaskId===c.task_id){
+        const t=C.tasks.find(x=>x.id===c.task_id);
+        if(t) renderDetail(t);
+        // Highlight new comment visually
+        setTimeout(()=>{
+          const cmtList=document.getElementById('cmt-list');
+          if(cmtList){ const last=cmtList.lastElementChild; if(last){ last.style.transition='background .5s'; last.style.background='var(--blue-bg)'; setTimeout(()=>last.style.background='',1500); } }
+        },100);
+      }
+      // Show a live indicator if someone else commented
+      if(c.user_id!==CU.id){
+        const author=getUser(c.user_id);
+        showRealtimePop(`💬 ${author?.name||'Someone'} commented`);
+      }
+    })
+    // ── Notifications for THIS user ──
+    .on('postgres_changes',{event:'INSERT',schema:'public',table:'notifications',filter:`user_id=eq.${CU.id}`},async payload=>{
+      const n=payload.new;
+      const exists=C.notifications.find(x=>x.id===n.id);
+      if(!exists){ C.notifications.unshift(n); }
+      updateBadges();
+      renderNotifs();
+      showRealtimePop('🔔 '+n.text.replace(/<[^>]+>/g,''));
+    })
+    .subscribe((status)=>{
+      const ind=document.getElementById('rt-ind');
+      if(status==='SUBSCRIBED'){
+        _rtConnected=true;
+        if(ind){ ind.className='rt-dot connected'; ind.title='Live — real-time active'; }
+      } else if(status==='CLOSED'||status==='CHANNEL_ERROR'){
+        _rtConnected=false;
+        if(ind){ ind.className='rt-dot disconnected'; ind.title='Polling mode (8s refresh)'; }
+      } else {
+        _rtConnected=false;
+        if(ind){ ind.className='rt-dot connecting'; ind.title='Connecting…'; }
+      }
+    });
+  // Always start polling as a safety net
+  startPollingFallback();
+}
+
+function showRealtimePop(msg){
+  const el=document.getElementById('rt-pop');
+  if(!el) return;
+  el.textContent=msg;
+  el.classList.add('on');
+  if(_rtPopTimer) clearTimeout(_rtPopTimer);
+  _rtPopTimer=setTimeout(()=>el.classList.remove('on'),3000);
+}
+
+// ── POLLING FALLBACK: refreshes every 8s if realtime not connected ──
+function startPollingFallback(){
+  stopPolling();
+  _pollTimer=setInterval(async()=>{
+    if(_rtConnected) return; // realtime is working, skip poll
+    const prev=C.tasks.map(t=>t.id+t.updated_at+t.status).join('|');
+    const {data:tasks}=await sb.from('tasks').select('*').order('created_at',{ascending:false});
+    if(!tasks) return;
+    const next=tasks.map(t=>t.id+t.updated_at+t.status).join('|');
+    if(prev!==next){
+      C.tasks=tasks;
+      renderPage(curPage);
+      updateBadges();
+      showRealtimePop('🔄 Tasks updated');
+    }
+    // Also refresh notifications
+    const {data:notifs}=await sb.from('notifications').select('*').eq('user_id',CU.id).order('created_at',{ascending:false}).limit(40);
+    if(notifs){
+      const prevUnread=(C.notifications||[]).filter(n=>!n.read).length;
+      C.notifications=notifs;
+      const newUnread=notifs.filter(n=>!n.read).length;
+      if(newUnread>prevUnread){ updateBadges(); renderNotifs(); showRealtimePop('🔔 New notification'); }
+      else updateBadges();
+    }
+  },8000);
+}
+
+function stopPolling(){ if(_pollTimer){ clearInterval(_pollTimer); _pollTimer=null; } }
 
 async function enterApp(){
   document.getElementById('login-page').style.display='none';
@@ -895,6 +1031,7 @@ async function enterApp(){
   document.getElementById('app').classList.add('on');
   renderSidebar();
   nav('dashboard');
+  setupRealtime();
   // Run cleanup silently after UI is visible
   setTimeout(autoCleanupVerifiedTasks, 1500);
 }
@@ -920,6 +1057,7 @@ async function restoreSession(){
     document.getElementById('app').classList.add('on');
     renderSidebar();
     nav('dashboard');
+    setupRealtime();
     setTimeout(autoCleanupVerifiedTasks, 1500);
   }catch(e){
     document.getElementById('load-screen').classList.remove('on');
@@ -1169,13 +1307,19 @@ function statusBadge(s){
 // ══════════════════════════════════════════════════════
 //  ALL TASKS PAGE
 // ══════════════════════════════════════════════════════
-let TF={type:'',priority:'',status:'',search:'',sortBy:'priority'};
+let TF={type:'',priority:'',status:'',search:'',sortBy:'priority',userId:''};
 
 function renderTasks(){
+  const isSA=['superadmin','admin'].includes(CU.role);
+  const filterUsers=isSA?allUsers().filter(u=>['subadmin','user'].includes(u.role)&&u.active):[];
   document.getElementById('pg-tasks').innerHTML=`
   <div class="scard">
     <div class="fbar">
-      <input type="text" placeholder="Search title, description…" style="max-width:180px" oninput="TF.search=this.value;renderTaskList()" value="${TF.search}">
+      <input type="text" placeholder="Search title, description…" style="max-width:160px" oninput="TF.search=this.value;renderTaskList()" value="${TF.search}">
+      ${isSA?`<select onchange="TF.userId=this.value;renderTaskList()" style="max-width:160px">
+        <option value="">👤 All Users</option>
+        ${filterUsers.map(u=>`<option value="${u.id}" ${TF.userId==u.id?'selected':''}>${u.name} (${RL[u.role]})</option>`).join('')}
+      </select>`:''}
       <select onchange="TF.type=this.value;renderTaskList()">
         <option value="">All Types</option>
         <option value="Daily" ${TF.type==='Daily'?'selected':''}>Daily</option>
@@ -1203,15 +1347,50 @@ function renderTasks(){
         <option value="created">Sort: Newest</option>
         <option value="status">Sort: Status</option>
       </select>
-      <button class="fbtn" onclick="TF={type:'',priority:'',status:'',search:'',sortBy:'priority'};renderTasks()">↺ Reset</button>
+      <button class="fbtn" onclick="TF={type:'',priority:'',status:'',search:'',sortBy:'priority',userId:''};renderTasks()">↺ Reset</button>
     </div>
+    ${TF.userId?renderUserWorkloadBanner(parseInt(TF.userId)):''}
     <div id="tlist" style="padding:14px 18px"></div>
   </div>`;
   renderTaskList();
 }
 
+function renderUserWorkloadBanner(uid){
+  const u=allUsers().find(x=>x.id===uid); if(!u) return '';
+  const ut=allTasks().filter(t=>t.assigned_to_user===uid||t.assigned_to===uid);
+  const done=ut.filter(t=>t.status==='Verified').length;
+  const pend=ut.filter(t=>['In Progress','Assigned','Created'].includes(t.status)).length;
+  const ov=ut.filter(t=>overdue(t)).length;
+  const pct=ut.length?Math.round(done/ut.length*100):0;
+  return `<div style="display:flex;align-items:center;gap:14px;padding:10px 18px;background:var(--bg4);border-bottom:1px solid var(--border)">
+    <div class="uav" style="background:${u.color}22;color:${u.color};border:1.5px solid ${u.color}44;width:34px;height:34px;font-size:12px;flex-shrink:0">${u.avatar}</div>
+    <div style="flex:1">
+      <div style="font-size:12px;font-weight:600;color:var(--t)">${u.name} <span style="color:var(--t3);font-weight:400">· ${RL[u.role]}</span></div>
+      <div style="display:flex;gap:14px;margin-top:4px">
+        <span style="font-size:10px;color:var(--t3)">${ut.length} tasks total</span>
+        <span style="font-size:10px;color:var(--green)">${done} verified</span>
+        <span style="font-size:10px;color:var(--amber)">${pend} pending</span>
+        ${ov?`<span style="font-size:10px;color:var(--red);font-weight:700">${ov} overdue</span>`:''}
+      </div>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:18px;font-weight:700;color:var(--gold);font-family:'DM Mono',monospace">${pct}%</div>
+      <div style="font-size:9px;color:var(--t3);text-transform:uppercase">completion</div>
+    </div>
+  </div>`;
+}
+
+function filterTasksByUser(uid){
+  TF.userId=uid?String(uid):'';
+  nav('tasks');
+}
+
 function renderTaskList(){
   let t=visibleTasks();
+  if(TF.userId){
+    const uid=parseInt(TF.userId);
+    t=t.filter(x=>x.assigned_to_user===uid||x.assigned_to===uid);
+  }
   if(TF.search){
     const s=TF.search.toLowerCase();
     t=t.filter(x=>x.title.toLowerCase().includes(s)||
@@ -1405,7 +1584,7 @@ function renderDetail(t){
     ${wfHtml}
     <div class="cmts">
       <div class="cmts-hd">Comments (${cmts.length})</div>
-      ${cmtsHtml||'<div style="color:var(--t3);font-size:12px;margin-bottom:10px">No comments yet.</div>'}
+      <div id="cmt-list">${cmtsHtml||'<div style="color:var(--t3);font-size:12px;margin-bottom:10px">No comments yet.</div>'}</div>
       <div class="cinput">
         <input type="text" id="cmt-inp" placeholder="Add a comment…" onkeydown="if(event.key==='Enter')postCmt()">
         <button class="btn bo btn-sm" onclick="postCmt()">Send</button>
@@ -1842,6 +2021,7 @@ function renderUsers(){
             </div>`:''}
           </div>
           ${isSA?`<div class="uacts">
+            <button class="btn bg- btn-xs" onclick="event.stopPropagation();filterTasksByUser(${u.id})" title="View in All Tasks with filter">◈ Tasks</button>
             <button class="btn bp btn-xs" onclick="event.stopPropagation();openEditUser(${u.id})">✎ Edit</button>
             <button class="btn bo btn-xs" onclick="event.stopPropagation();doToggleUser(${u.id})">${u.active?'Deactivate':'Activate'}</button>
             <button class="btn bd btn-xs" onclick="event.stopPropagation();doRemoveUser(${u.id})">⊗</button>
@@ -2157,7 +2337,7 @@ Object.assign(window,{
   openReject, confirmReject, doResubmit, doDelete, postCmt,
   toggleNotif, markAllRead, markRead, switchMTab, doLogin, logout,
   closeM, TF, UFilt, renderTasks, renderUsers, renderUserTasks,
-  toggleTheme, doChangePassword, autoCleanupVerifiedTasks
+  toggleTheme, doChangePassword, autoCleanupVerifiedTasks, filterTasksByUser
 });
 </script>
 </body>
