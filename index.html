@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TaskFlow</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -802,7 +802,7 @@ textarea{resize:vertical;min-height:76px}
 //  !! CONFIGURE YOUR SUPABASE CREDENTIALS !!
 // ══════════════════════════════════════════════════════
 const SUPABASE_URL  = 'https://fembojmrxtnnsqummksq.supabase.co';
-const SUPABASE_KEY  = 'sb_publishable_aM_fSOb9bQaH5wQy1r7lFg_5XFuhZbW'; // ← eyJ... key from Supabase Dashboard → Project Settings → API
+const SUPABASE_KEY  = 'sb_publishable_aM_fSOb9bQaH5wQy1r7lFg_5XFuhZbW';
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -935,7 +935,7 @@ async function doLogin(){
   const {data,error} = await sb.from('users').select('*')
     .eq('email',email).eq('password',pass).eq('active',true).single();
   btn.disabled=false; btn.textContent='Sign In';
-  if(error||!data){ errEl.textContent='Invalid credentials or account inactive.'; return; }
+  if(error||!data){ errEl.textContent='Invalid credentials or account inactive. ('+( error?.message||error?.code||'no match')+')'; return; }
   CU = data;
   try{ sessionStorage.setItem('tf_s', JSON.stringify({id:data.id,email:data.email})); }catch(e){}
   enterApp();
