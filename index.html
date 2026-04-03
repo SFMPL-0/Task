@@ -2924,11 +2924,27 @@ document.addEventListener('click',e=>{
 document.querySelectorAll('.moverlay').forEach(o=>o.addEventListener('click',e=>{ if(e.target===o) o.classList.remove('on'); }));
 
 // ══════════════════════════════════════════════════════
-//  AUTO-CLEANUP: DISABLED — no automatic deletion
+//  AUTO-CLEANUP: Delete Verified tasks older than 7 days
+//  Runs once on login. SuperAdmin/Admin only to avoid
+//  permission errors on anon key.
 // ══════════════════════════════════════════════════════
 async function autoCleanupVerifiedTasks(){
-  // Auto-cleanup is disabled. Tasks are never automatically deleted.
-  return;
+  if(!['superadmin','admin'].includes(CU?.role)) return;
+  const cutoff=new Date();
+  cutoff.setDate(cutoff.getDate()-7);
+  const cutoffStr=cutoff.toISOString();
+  const {data:old}=await sb.from('tasks')
+    .select('id')
+    .eq('status','Verified')
+    .lt('verified_at',cutoffStr);
+  if(!old||!old.length) return;
+  const ids=old.map(t=>t.id);
+  // Delete comments first (cascade should handle it, but be safe)
+  await sb.from('comments').delete().in('task_id',ids);
+  const {error}=await sb.from('tasks').delete().in('id',ids);
+  if(!error && ids.length){
+    toast(`🗑 Auto-cleaned ${ids.length} verified task${ids.length>1?'s':''} older than 7 days`,'in');
+  }
 }
 
 // ══════════════════════════════════════════════════════
@@ -2941,40 +2957,45 @@ function renderDaySheet(){
   const el=document.getElementById('pg-daysheet'); if(!el) return;
   const now=new Date();
   const isSA=CU.role==='superadmin';
-  // backDays=0 means only today; SA can set more via settings
-  const backDays=isSA?(C.dsBackDays||0):0;
+  const backDays=C.dsBackDays||3;
 
   // Init state defaults
   if(!_dsState.userId) _dsState.userId=CU.id;
-  if(!_dsState.viewMonth) _dsState.viewMonth=now.toISOString().slice(0,7);
+  if(!_dsState.viewMonth) _dsState.viewMonth=now.toISOString().slice(0,7); // YYYY-MM
 
-  // Build allowed entry dates (today only for users, SA gets backDays)
+  // Build allowed entry dates for current user (not SA)
   const allowedDates=[];
-  for(let i=0;i<=backDays;i++){
+  for(let i=0;i<backDays+1;i++){
     const d=new Date(now); d.setDate(now.getDate()-i);
     allowedDates.push(d.toISOString().slice(0,10));
   }
 
   // Filter entries
-  const viewUserId=isSA?parseInt(_dsState.userId||CU.id):CU.id;
-  let entries=C.daySheet.filter(e=>e.user_id===viewUserId);
+  const viewUserId = isSA ? parseInt(_dsState.userId||CU.id) : CU.id;
+  let entries = C.daySheet.filter(e=> e.user_id===viewUserId);
 
+  // Date filter — specific date picked
   if(_dsState.filterDate){
-    entries=entries.filter(e=>e.entry_date===_dsState.filterDate);
+    entries = entries.filter(e=>e.entry_date===_dsState.filterDate);
   } else {
-    entries=entries.filter(e=>e.entry_date.slice(0,7)===_dsState.viewMonth);
+    // Filter by view month
+    entries = entries.filter(e=>e.entry_date.slice(0,7)===_dsState.viewMonth);
   }
 
   // Group by date
   const byDate={};
   entries.forEach(e=>{ if(!byDate[e.entry_date]) byDate[e.entry_date]=[]; byDate[e.entry_date].push(e); });
 
-  // Dates to display
+  // Determine which dates to show:
+  // If specific date filter → only that date
+  // Else → all dates in month + empty rows for allowed entry dates
   let displayDates=[];
   if(_dsState.filterDate){
     displayDates=[_dsState.filterDate];
   } else {
+    // Dates that have data in the month
     const existingDates=[...new Set(entries.map(e=>e.entry_date))].sort((a,b)=>b.localeCompare(a));
+    // Plus allowed empty dates (for entry) if viewing current month
     const isCurrentMonth=_dsState.viewMonth===now.toISOString().slice(0,7);
     if(isCurrentMonth && viewUserId===CU.id){
       allowedDates.forEach(d=>{ if(!existingDates.includes(d)) existingDates.unshift(d); });
@@ -2984,6 +3005,7 @@ function renderDaySheet(){
 
   const monthName=`${new Date(_dsState.viewMonth+'-01').toLocaleDateString('en-IN',{month:'short',year:'2-digit'})} Day Sheet`;
 
+  // Build filter bar
   const monthOpts=[0,1,2,3].map(i=>{
     const d=new Date(now); d.setMonth(now.getMonth()-i);
     const ym=d.toISOString().slice(0,7);
@@ -2996,7 +3018,9 @@ function renderDaySheet(){
         <option value="${CU.id}">My Entries</option>
         ${allUsers().filter(u=>u.id!==CU.id&&u.active).map(u=>`<option value="${u.id}" ${_dsState.userId==u.id?'selected':''}>${u.name}</option>`).join('')}
       </select>`:''}
-      <select onchange="_dsState.viewMonth=this.value;_dsState.filterDate='';renderDaySheet()">${monthOpts}</select>
+      <select onchange="_dsState.viewMonth=this.value;_dsState.filterDate='';renderDaySheet()">
+        ${monthOpts}
+      </select>
       <div style="display:flex;align-items:center;gap:6px">
         <label style="font-size:10px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.07em">Filter Date:</label>
         <input type="date" class="ds-sel" value="${_dsState.filterDate||''}"
@@ -3006,6 +3030,7 @@ function renderDaySheet(){
       ${_dsState.filterDate?`<button class="btn bo btn-sm" onclick="_dsState.filterDate='';renderDaySheet()">✕ Clear Date</button>`:''}
     </div>`;
 
+  // Build table rows
   const rows=displayDates.map(date=>{
     const dateEntries=byDate[date]||[];
     const isToday=date===today();
@@ -3020,7 +3045,7 @@ function renderDaySheet(){
         <td><input class="ds-url-inp" placeholder="Paste Drive URL…" id="ds-url-${date}"></td>
         <td><input class="ds-inp" placeholder="Bill / MF / GC No…" id="ds-ref-${date}"></td>
         <td><input class="ds-inp" placeholder="Remarks…" id="ds-rem-${date}"></td>
-        <td><input class="ds-inp amount" placeholder="Amount" type="text" inputmode="decimal" id="ds-amt-${date}" oninput="this.value=this.value.replace(/[^0-9.]/g,'')"></td>
+        <td><input class="ds-inp amount" placeholder="0.00" type="number" id="ds-amt-${date}"></td>
         <td><button class="ds-save-btn" onclick="saveDsRow('${date}')">Save</button></td>
       </tr>`;
     }
@@ -3034,15 +3059,29 @@ function renderDaySheet(){
 
     return dateEntries.map((e,idx)=>`
       <tr class="${isToday?'ds-today':''}" id="ds-row-${e.id}">
-        <td style="font-size:11px;color:var(--t2);white-space:nowrap;font-family:'DM Mono',monospace;font-weight:${isToday?'700':'400'}">${idx===0?displayDate+(isToday?' <span style="color:var(--gold);font-size:9px">TODAY</span>':''):''}</td>
-        <td>${isSA?`<input class="ds-inp" value="${(e.particular||'').replace(/"/g,'&quot;')}" onchange="updateDsField(${e.id},'particular',this.value)">`:`<span style="font-size:12px;color:var(--t)">${e.particular||'—'}</span>`}</td>
-        <td>${isSA?`<select class="ds-sel" onchange="updateDsField(${e.id},'supported_doc',this.value)"><option ${e.supported_doc==='YES'?'selected':''}>YES</option><option ${e.supported_doc==='NO'?'selected':''}>NO</option></select>`:`<span class="bdg ${e.supported_doc==='YES'?'b-gr':'b-rd'}" style="font-size:10px">${e.supported_doc||'—'}</span>`}</td>
-        <td>${isSA?`<input class="ds-url-inp" value="${(e.drive_link||'').replace(/"/g,'&quot;')}" onchange="updateDsField(${e.id},'drive_link',this.value)">`:(e.drive_link?`<a href="${e.drive_link}" target="_blank" style="font-size:11px;color:var(--blue)">🔗 Open</a>`:'—')}</td>
-        <td>${isSA?`<input class="ds-inp" value="${(e.ref_numbers||'').replace(/"/g,'&quot;')}" onchange="updateDsField(${e.id},'ref_numbers',this.value)">`:`<span style="font-size:11px;color:var(--t2);font-family:'DM Mono',monospace">${e.ref_numbers||'—'}</span>`}</td>
-        <td>${isSA?`<input class="ds-inp" value="${(e.remarks||'').replace(/"/g,'&quot;')}" onchange="updateDsField(${e.id},'remarks',this.value)">`:`<span style="font-size:12px;color:var(--t2)">${e.remarks||'—'}</span>`}</td>
-        <td style="font-family:'DM Mono',monospace;font-size:12px;text-align:right">${isSA?`<input class="ds-inp amount" value="${e.amount||''}" type="text" inputmode="decimal" onchange="updateDsField(${e.id},'amount',this.value)" oninput="this.value=this.value.replace(/[^0-9.]/g,'')">`:`₹${Number(e.amount||0).toLocaleString('en-IN')}`}</td>
+        <td style="font-size:11px;color:var(--t2);white-space:nowrap;font-family:'DM Mono',monospace;font-weight:${isToday?'700':'400'}">${idx===0?displayDate+( isToday?' <span style="color:var(--gold);font-size:9px">TODAY</span>':''):''}</td>
+        <td>${isSA
+          ?`<input class="ds-inp" value="${(e.particular||'').replace(/"/g,'&quot;')}" onchange="updateDsField(${e.id},'particular',this.value)">`
+          :`<span style="font-size:12px;color:var(--t)">${e.particular||'—'}</span>`}</td>
+        <td>${isSA
+          ?`<select class="ds-sel" onchange="updateDsField(${e.id},'supported_doc',this.value)"><option ${e.supported_doc==='YES'?'selected':''}>YES</option><option ${e.supported_doc==='NO'?'selected':''}>NO</option></select>`
+          :`<span class="bdg ${e.supported_doc==='YES'?'b-gr':'b-rd'}" style="font-size:10px">${e.supported_doc||'—'}</span>`}</td>
+        <td>${isSA
+          ?`<input class="ds-url-inp" value="${(e.drive_link||'').replace(/"/g,'&quot;')}" onchange="updateDsField(${e.id},'drive_link',this.value)">`
+          :(e.drive_link?`<a href="${e.drive_link}" target="_blank" style="font-size:11px;color:var(--blue)">🔗 Open</a>`:'—')}</td>
+        <td>${isSA
+          ?`<input class="ds-inp" value="${(e.ref_numbers||'').replace(/"/g,'&quot;')}" onchange="updateDsField(${e.id},'ref_numbers',this.value)">`
+          :`<span style="font-size:11px;color:var(--t2);font-family:'DM Mono',monospace">${e.ref_numbers||'—'}</span>`}</td>
+        <td>${isSA
+          ?`<input class="ds-inp" value="${(e.remarks||'').replace(/"/g,'&quot;')}" onchange="updateDsField(${e.id},'remarks',this.value)">`
+          :`<span style="font-size:12px;color:var(--t2)">${e.remarks||'—'}</span>`}</td>
+        <td style="font-family:'DM Mono',monospace;font-size:12px;text-align:right">${isSA
+          ?`<input class="ds-inp amount" value="${e.amount||''}" type="number" onchange="updateDsField(${e.id},'amount',this.value)">`
+          :`₹${Number(e.amount||0).toLocaleString('en-IN')}`}</td>
         <td style="white-space:nowrap;text-align:center">
-          ${isSA?`<button class="ds-edit-btn" onclick="deleteDsRow(${e.id})" style="background:var(--red-bg);border-color:var(--red-bd);color:var(--red)">🗑 Delete</button>`:`<span class="ds-locked">🔒 Locked</span>`}
+          ${isSA
+            ?`<button class="ds-edit-btn" onclick="deleteDsRow(${e.id})" title="Delete entry (Super Admin only)" style="background:var(--red-bg);border-color:var(--red-bd);color:var(--red)">🗑 Delete</button>`
+            :`<span class="ds-locked">🔒 Locked</span>`}
         </td>
       </tr>`).join('');
   }).join('');
@@ -3051,7 +3090,7 @@ function renderDaySheet(){
   <div class="scard">
     <div class="shead">
       <span class="stitle"><span class="stitle-accent"></span><span class="ds-month-hd" style="margin:0">${monthName}</span></span>
-      ${isSA?`<button class="btn bo btn-sm" onclick="openDsSettings()">⚙ Back Days: ${backDays}</button>`:'<span style="font-size:10px;color:var(--t3)">Only today\'s entry is allowed</span>'}
+      ${isSA?`<button class="btn bo btn-sm" onclick="openDsSettings()">⚙ Back Days: ${backDays}</button>`:''}
     </div>
     ${filterBar}
     <div class="sbody" style="padding:0;margin-top:10px">
@@ -3088,8 +3127,6 @@ async function loadDsForUser(uid){
 async function saveDsRow(date){
   const particular=document.getElementById('ds-part-'+date)?.value?.trim();
   if(!particular){ toast('Particular is required','er'); return; }
-  const amtRaw=document.getElementById('ds-amt-'+date)?.value?.trim();
-  const amount=amtRaw===''?0:parseFloat(amtRaw)||0;
   const payload={
     user_id:       CU.id,
     entry_date:    date,
@@ -3098,7 +3135,7 @@ async function saveDsRow(date){
     drive_link:    document.getElementById('ds-url-'+date)?.value?.trim()||'',
     ref_numbers:   document.getElementById('ds-ref-'+date)?.value?.trim()||'',
     remarks:       document.getElementById('ds-rem-'+date)?.value?.trim()||'',
-    amount,
+    amount:        parseFloat(document.getElementById('ds-amt-'+date)?.value)||0,
     locked:        true
   };
   const {data,error}=await sb.from('day_sheet').insert(payload).select().single();
@@ -3193,65 +3230,14 @@ function renderReportsUser(el){
   const pct=Math.round(score/maxScore*100);
   const col=scoreColor(pct);
 
-  // Separate normal and audit tasks
-  const normalTasks=tasks.filter(t=>t.type!=='Branch Audit');
-  const auditTasks=tasks.filter(t=>t.type==='Branch Audit');
-
-  const taskRows=normalTasks.slice().sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).slice(0,20).map(t=>`
+  const taskRows=tasks.slice().sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).slice(0,20).map(t=>`
     <tr>
       <td style="font-size:12px;font-weight:500;color:var(--t)">${t.title}</td>
-      <td><span class="bdg b-gy" style="font-size:9px">${t.type}</span></td>
+      <td><span class="bdg b-gy" style="font-size:9px">${t.type==='Branch Audit'?'Audit':t.type}</span></td>
       <td><span class="bdg ${statusBadge(t.status)}" style="font-size:9px">${t.status}</span></td>
       <td style="font-size:11px;color:var(--t2);font-family:'DM Mono',monospace">${fmt(t.due_date)}</td>
       <td style="text-align:center">${overdue(t)?'<span style="color:var(--red);font-size:10px;font-weight:700">⚠ OVERDUE</span>':'<span style="color:var(--green);font-size:10px">✓</span>'}</td>
     </tr>`).join('');
-
-  // Branch Audit section — show per-audit summary
-  const auditSection=auditTasks.length?`
-  <div class="scard">
-    <div class="shead"><span class="stitle"><span class="stitle-accent"></span>🏦 Branch Audit History</span></div>
-    <div class="sbody" style="padding:0;overflow-x:auto">
-      <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:560px">
-        <thead><tr style="border-bottom:2px solid var(--border2)">
-          <th style="padding:8px 12px;text-align:left;font-size:10px;color:var(--t3);text-transform:uppercase;background:var(--bg3)">Audit Task</th>
-          <th style="padding:8px 12px;text-align:center;font-size:10px;color:var(--t3);text-transform:uppercase;background:var(--bg3)">Due</th>
-          <th style="padding:8px 12px;text-align:center;font-size:10px;color:var(--t3);text-transform:uppercase;background:var(--bg3)">Status</th>
-          <th style="padding:8px 12px;text-align:center;font-size:10px;color:var(--t3);text-transform:uppercase;background:var(--bg3)">Branches</th>
-          <th style="padding:8px 12px;text-align:center;font-size:10px;color:var(--amber);text-transform:uppercase;background:var(--bg3)">Bill Issues</th>
-          <th style="padding:8px 12px;text-align:center;font-size:10px;color:var(--blue);text-transform:uppercase;background:var(--bg3)">GC Issues</th>
-          <th style="padding:8px 12px;text-align:center;font-size:10px;color:var(--red);text-transform:uppercase;background:var(--bg3)">MF Missing</th>
-        </tr></thead>
-        <tbody>
-          ${auditTasks.slice().sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).map(t=>{
-            const branches=C.auditBranches[t.id]||[];
-            let billProb=0,gcProb=0,mfMiss=0;
-            branches.forEach(b=>{
-              const cl=(C._auditByBranch&&C._auditByBranch[b.id])||Object.values(C.auditChecklist).find(x=>x.branch_id===b.id)||{};
-              if(cl.bill_status==='-') billProb++;
-              if(cl.gc_status==='-')   gcProb++;
-              if(cl.mf_missing)        mfMiss++;
-            });
-            const allOk=!billProb&&!gcProb&&!mfMiss&&branches.length>0;
-            return `<tr style="border-bottom:1px solid var(--border);cursor:pointer" onclick="openDetail(${t.id})">
-              <td style="padding:9px 12px;font-size:12px;font-weight:600;color:var(--t)">${t.title}</td>
-              <td style="padding:9px 12px;text-align:center;font-size:11px;color:var(--t2);font-family:'DM Mono',monospace">${fmt(t.due_date)}</td>
-              <td style="padding:9px 12px;text-align:center"><span class="bdg ${statusBadge(t.status)}" style="font-size:9px">${t.status}</span></td>
-              <td style="padding:9px 12px;text-align:center;font-size:12px;font-weight:700;color:var(--t)">${branches.length}</td>
-              <td style="padding:9px 12px;text-align:center">
-                ${billProb?`<span style="color:var(--amber);font-weight:700;font-size:12px">${billProb}</span>`:'<span style="color:var(--green);font-size:11px">✓</span>'}
-              </td>
-              <td style="padding:9px 12px;text-align:center">
-                ${gcProb?`<span style="color:var(--blue);font-weight:700;font-size:12px">${gcProb}</span>`:'<span style="color:var(--green);font-size:11px">✓</span>'}
-              </td>
-              <td style="padding:9px 12px;text-align:center">
-                ${mfMiss?`<span style="color:var(--red);font-weight:700;font-size:12px">${mfMiss}</span>`:'<span style="color:var(--green);font-size:11px">✓</span>'}
-              </td>
-            </tr>`;
-          }).join('')}
-        </tbody>
-      </table>
-    </div>
-  </div>`:'';
 
   el.innerHTML=`
   <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
@@ -3280,8 +3266,7 @@ function renderReportsUser(el){
       </div>
     </div>
   </div>
-  ${auditSection}
-  ${normalTasks.length?`<div class="scard">
+  <div class="scard">
     <div class="shead"><span class="stitle"><span class="stitle-accent"></span>Task History</span></div>
     <div class="sbody" style="padding:0;overflow-x:auto">
       <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:500px">
@@ -3295,8 +3280,7 @@ function renderReportsUser(el){
         <tbody>${taskRows||'<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--t3)">No tasks yet</td></tr>'}</tbody>
       </table>
     </div>
-  </div>`:''}`;
-}
+  </div>`;
 }
 
 function renderReportsSA(el){
@@ -3369,8 +3353,7 @@ function renderReportsSA(el){
 
 function openPrintPreview(){
   const isSA=['superadmin','admin'].includes(CU.role);
-  let bodyHtml='';
-
+  let html='';
   if(isSA){
     const users=allUsers().filter(u=>['user','subadmin'].includes(u.role)&&u.active);
     const rows=users.map(u=>{
@@ -3379,133 +3362,44 @@ function openPrintPreview(){
       const maxS=ut.length*10||1;
       const pct=Math.round(score/maxS*100);
       const pending=ut.filter(t=>['In Progress','Assigned','Created'].includes(t.status)).length;
-      const pressure=pending>=8?'High':pending>=4?'Medium':'Low';
-      return `<tr>
-        <td>${u.name}</td>
-        <td style="text-align:center">${ut.length}</td>
-        <td style="text-align:center;color:#16a34a">${detail.verified}</td>
-        <td style="text-align:center;color:#d97706">${pending}</td>
-        <td style="text-align:center;color:#dc2626">${detail.overdue}</td>
-        <td style="text-align:center;color:#dc2626">${detail.rejected}</td>
-        <td style="text-align:center;font-weight:700;color:#c9a84c">${pct}%</td>
-        <td style="text-align:center;color:${pressure==='High'?'#dc2626':pressure==='Medium'?'#d97706':'#16a34a'}">${pressure}</td>
-      </tr>`;
+      return `<tr><td>${u.name}</td><td style="text-align:center">${ut.length}</td><td style="text-align:center;color:green">${detail.verified}</td><td style="text-align:center;color:orange">${pending}</td><td style="text-align:center;color:red">${detail.overdue}</td><td style="text-align:center;color:red">${detail.rejected}</td><td style="text-align:center;font-weight:700">${pct}%</td></tr>`;
     }).join('');
-    bodyHtml=`
-      <h1 style="font-family:serif;font-size:22px;margin-bottom:4px">TaskFlow — Team Performance Report</h1>
-      <p style="color:#666;font-size:12px;margin-bottom:20px">SFMPL &nbsp;|&nbsp; Generated: ${new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'})}</p>
-      <h2 style="font-size:14px;font-weight:700;border-bottom:2px solid #ddd;padding-bottom:6px;margin-bottom:10px">Team Summary</h2>
-      <table style="width:100%;border-collapse:collapse;font-size:12px">
-        <thead><tr style="background:#f5f5f5">
-          <th style="padding:8px;border:1px solid #ddd;text-align:left">User</th>
-          <th style="padding:8px;border:1px solid #ddd">Total Tasks</th>
-          <th style="padding:8px;border:1px solid #ddd">Verified</th>
-          <th style="padding:8px;border:1px solid #ddd">Pending</th>
-          <th style="padding:8px;border:1px solid #ddd">Overdue</th>
-          <th style="padding:8px;border:1px solid #ddd">Rejected</th>
-          <th style="padding:8px;border:1px solid #ddd">Score</th>
-          <th style="padding:8px;border:1px solid #ddd">Pressure</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>`;
+    html=`<div class="print-preview">
+      <h1>TaskFlow — Team Performance Report</h1>
+      <p style="color:#666;font-size:11px">Generated: ${new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'})}</p>
+      <h2>Overall Summary</h2>
+      <table><thead><tr><th>User</th><th>Total</th><th>Verified</th><th>Pending</th><th>Overdue</th><th>Rejected</th><th>Score</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>`;
   } else {
     const tasks=myTasks();
     const {score,detail}=calcScore(tasks);
     const maxScore=tasks.length*10||1;
     const pct=Math.round(score/maxScore*100);
-    // Normal tasks
-    const normalTasks=tasks.filter(t=>t.type!=='Branch Audit');
-    const auditTasks=tasks.filter(t=>t.type==='Branch Audit');
-    const taskRows=normalTasks.map(t=>`<tr>
-      <td style="padding:6px 8px;border:1px solid #ddd">${t.title}</td>
-      <td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${t.type}</td>
-      <td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${t.status}</td>
-      <td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${fmt(t.due_date)}</td>
-      <td style="padding:6px 8px;border:1px solid #ddd;text-align:center;color:${overdue(t)?'#dc2626':'#16a34a'}">${overdue(t)?'⚠ OVERDUE':'✓ OK'}</td>
-    </tr>`).join('');
-    // Branch audit rows with checklist summary
-    const auditRows=auditTasks.map(t=>{
-      const branches=C.auditBranches[t.id]||[];
-      let billProb=0,gcProb=0,mfMiss=0;
-      branches.forEach(b=>{
-        const cl=(C._auditByBranch&&C._auditByBranch[b.id])||Object.values(C.auditChecklist).find(x=>x.branch_id===b.id)||{};
-        if(cl.bill_status==='-') billProb++;
-        if(cl.gc_status==='-')   gcProb++;
-        if(cl.mf_missing)        mfMiss++;
-      });
-      return `<tr>
-        <td style="padding:6px 8px;border:1px solid #ddd">${t.title}</td>
-        <td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${fmt(t.due_date)}</td>
-        <td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${t.status}</td>
-        <td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${branches.length}</td>
-        <td style="padding:6px 8px;border:1px solid #ddd;text-align:center;color:${billProb?'#d97706':'#16a34a'}">${billProb||'✓'}</td>
-        <td style="padding:6px 8px;border:1px solid #ddd;text-align:center;color:${gcProb?'#2563eb':'#16a34a'}">${gcProb||'✓'}</td>
-        <td style="padding:6px 8px;border:1px solid #ddd;text-align:center;color:${mfMiss?'#dc2626':'#16a34a'}">${mfMiss||'✓'}</td>
-      </tr>`;
-    }).join('');
-
-    bodyHtml=`
-      <h1 style="font-family:serif;font-size:22px;margin-bottom:4px">TaskFlow — My Performance Report</h1>
-      <p style="color:#666;font-size:12px;margin-bottom:6px">User: <strong>${CU.name}</strong> &nbsp;|&nbsp; SFMPL &nbsp;|&nbsp; Generated: ${new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'})}</p>
-
-      <h2 style="font-size:14px;font-weight:700;border-bottom:2px solid #ddd;padding-bottom:6px;margin:18px 0 10px">Score Summary</h2>
-      <p style="font-size:32px;font-weight:700;color:#c9a84c;font-family:serif;margin-bottom:8px">${pct}%</p>
-      <table style="width:60%;border-collapse:collapse;font-size:12px;margin-bottom:20px">
-        <thead><tr style="background:#f5f5f5"><th style="padding:6px 8px;border:1px solid #ddd;text-align:left">Metric</th><th style="padding:6px 8px;border:1px solid #ddd">Count</th><th style="padding:6px 8px;border:1px solid #ddd">Points</th></tr></thead>
-        <tbody>
-          <tr><td style="padding:6px 8px;border:1px solid #ddd">Verified On Time</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${detail.onTime}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center;color:#16a34a">+${detail.onTime*10}</td></tr>
-          <tr><td style="padding:6px 8px;border:1px solid #ddd">Verified Late</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${detail.verified-detail.onTime}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center;color:#16a34a">+${(detail.verified-detail.onTime)*7}</td></tr>
-          <tr><td style="padding:6px 8px;border:1px solid #ddd">Rejected</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${detail.rejected}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center;color:#dc2626">-${detail.rejected*5}</td></tr>
-          <tr><td style="padding:6px 8px;border:1px solid #ddd">Overdue</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center">${detail.overdue}</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center;color:#dc2626">-${detail.overdue*3}</td></tr>
-          <tr style="font-weight:700;background:#fffbeb"><td style="padding:6px 8px;border:1px solid #ddd">Total Score</td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center"></td><td style="padding:6px 8px;border:1px solid #ddd;text-align:center;color:#c9a84c">${pct}%</td></tr>
-        </tbody>
-      </table>
-
-      ${normalTasks.length?`
-      <h2 style="font-size:14px;font-weight:700;border-bottom:2px solid #ddd;padding-bottom:6px;margin:18px 0 10px">Task Details</h2>
-      <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:20px">
-        <thead><tr style="background:#f5f5f5">
-          <th style="padding:6px 8px;border:1px solid #ddd;text-align:left">Task</th>
-          <th style="padding:6px 8px;border:1px solid #ddd">Type</th>
-          <th style="padding:6px 8px;border:1px solid #ddd">Status</th>
-          <th style="padding:6px 8px;border:1px solid #ddd">Due Date</th>
-          <th style="padding:6px 8px;border:1px solid #ddd">Overdue?</th>
-        </tr></thead>
-        <tbody>${taskRows}</tbody>
-      </table>`:''}
-
-      ${auditTasks.length?`
-      <h2 style="font-size:14px;font-weight:700;border-bottom:2px solid #ddd;padding-bottom:6px;margin:18px 0 10px">🏦 Branch Audit Summary</h2>
-      <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:20px">
-        <thead><tr style="background:#f5f5f5">
-          <th style="padding:6px 8px;border:1px solid #ddd;text-align:left">Audit Task</th>
-          <th style="padding:6px 8px;border:1px solid #ddd">Due Date</th>
-          <th style="padding:6px 8px;border:1px solid #ddd">Status</th>
-          <th style="padding:6px 8px;border:1px solid #ddd">Branches</th>
-          <th style="padding:6px 8px;border:1px solid #ddd">Bill Issues</th>
-          <th style="padding:6px 8px;border:1px solid #ddd">GC Issues</th>
-          <th style="padding:6px 8px;border:1px solid #ddd">MF Missing</th>
-        </tr></thead>
-        <tbody>${auditRows}</tbody>
-      </table>`:''}`;
+    const rows=tasks.map(t=>`<tr><td>${t.title}</td><td>${t.type==='Branch Audit'?'Audit':t.type}</td><td>${t.status}</td><td>${fmt(t.due_date)}</td><td>${overdue(t)?'⚠ OVERDUE':'✓ OK'}</td></tr>`).join('');
+    html=`<div class="print-preview">
+      <h1>TaskFlow — My Performance Report</h1>
+      <p style="color:#666;font-size:11px">User: ${CU.name} &nbsp;|&nbsp; Generated: ${new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'})}</p>
+      <h2>Score Summary</h2>
+      <table><thead><tr><th>Metric</th><th>Count</th><th>Points</th></tr></thead><tbody>
+        <tr><td>Verified On Time</td><td>${detail.onTime}</td><td style="color:green">+${detail.onTime*10}</td></tr>
+        <tr><td>Verified Late</td><td>${detail.verified-detail.onTime}</td><td style="color:green">+${(detail.verified-detail.onTime)*7}</td></tr>
+        <tr><td>Rejected</td><td>${detail.rejected}</td><td style="color:red">-${detail.rejected*5}</td></tr>
+        <tr><td>Overdue</td><td>${detail.overdue}</td><td style="color:red">-${detail.overdue*3}</td></tr>
+        <tr style="font-weight:700"><td>TOTAL SCORE</td><td></td><td style="color:#c9a84c">${pct}%</td></tr>
+      </tbody></table>
+      <h2>Task Details</h2>
+      <table><thead><tr><th>Task</th><th>Type</th><th>Status</th><th>Due Date</th><th>Overdue?</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>`;
   }
-
-  // Open in NEW WINDOW — this is the only reliable print method
-  const printWin=window.open('','_blank','width=900,height=700');
-  printWin.document.write(`<!DOCTYPE html><html><head>
-    <title>TaskFlow Report — ${CU.name}</title>
-    <meta charset="UTF-8">
-    <style>
-      *{margin:0;padding:0;box-sizing:border-box}
-      body{font-family:'Segoe UI',Arial,sans-serif;font-size:13px;color:#111;padding:32px;background:#fff;line-height:1.5}
-      @media print{body{padding:16px}}
-    </style>
-  </head><body>
-    ${bodyHtml}
-    <p style="margin-top:32px;font-size:10px;color:#999;border-top:1px solid #eee;padding-top:8px">TaskFlow by SFMPL &nbsp;·&nbsp; Printed on ${new Date().toLocaleString('en-IN')}</p>
-    <script>window.onload=function(){window.print();}<\/script>
-  </body></html>`);
-  printWin.document.close();
+  // Show in print preview modal using detail modal
+  document.getElementById('detail-title').textContent='📊 Performance Report — Print Preview';
+  document.getElementById('detail-body').innerHTML=html;
+  document.getElementById('detail-foot').innerHTML=`
+    <button class="btn bo" onclick="closeM('modal-detail')">Close</button>
+    <button class="btn bg-" onclick="window.print()">🖨 Print / Save PDF</button>`;
+  // Set print content
+  document.getElementById('print-content').innerHTML=html;
+  document.getElementById('modal-detail').classList.add('on');
 }
 
 // ══════════════════════════════════════════════════════
