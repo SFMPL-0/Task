@@ -3012,16 +3012,17 @@ function renderDaySheet(){
     const displayDate=new Date(date).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
     const canEnter=!isSA && allowedDates.includes(date) && viewUserId===CU.id;
 
+    // Empty date — show blank entry row
     if(!dateEntries.length && canEnter){
       return `<tr class="${isToday?'ds-today':''}">
         <td style="font-size:11px;color:var(--t2);white-space:nowrap;font-family:'DM Mono',monospace;font-weight:${isToday?'700':'400'}">${displayDate}${isToday?' <span style="color:var(--gold);font-size:9px">TODAY</span>':''}</td>
-        <td><input class="ds-inp" placeholder="Particular / Description…" id="ds-part-${date}"></td>
-        <td><select class="ds-sel" id="ds-doc-${date}"><option value="YES">YES</option><option value="NO">NO</option></select></td>
-        <td><input class="ds-url-inp" placeholder="Paste Drive URL…" id="ds-url-${date}"></td>
-        <td><input class="ds-inp" placeholder="Bill / MF / GC No…" id="ds-ref-${date}"></td>
-        <td><input class="ds-inp" placeholder="Remarks…" id="ds-rem-${date}"></td>
-        <td><input class="ds-inp amount" placeholder="Amount" type="text" inputmode="decimal" id="ds-amt-${date}" oninput="this.value=this.value.replace(/[^0-9.]/g,'')"></td>
-        <td><button class="ds-save-btn" onclick="saveDsRow('${date}')">Save</button></td>
+        <td><input class="ds-inp" placeholder="Particular / Description…" id="ds-part-${date}-0"></td>
+        <td><select class="ds-sel" id="ds-doc-${date}-0"><option value="YES">YES</option><option value="NO">NO</option></select></td>
+        <td><input class="ds-url-inp" placeholder="Paste Drive URL…" id="ds-url-${date}-0"></td>
+        <td><input class="ds-inp" placeholder="Bill / MF / GC No…" id="ds-ref-${date}-0"></td>
+        <td><input class="ds-inp" placeholder="Remarks…" id="ds-rem-${date}-0"></td>
+        <td><input class="ds-inp amount" placeholder="Amount" type="text" inputmode="decimal" id="ds-amt-${date}-0" oninput="this.value=this.value.replace(/[^0-9.]/g,'')"></td>
+        <td><button class="ds-save-btn" onclick="saveDsRow('${date}',0)">Save</button></td>
       </tr>`;
     }
 
@@ -3031,6 +3032,20 @@ function renderDaySheet(){
         <td colspan="7" style="font-size:11px;color:var(--t4);font-style:italic;padding-left:8px">No entries</td>
       </tr>`;
     }
+
+    // Existing entries — show all locked rows, then an extra blank row at bottom for new entry
+    const newRowIdx = dateEntries.length; // unique index for the new input row
+    const newEntryRow = canEnter ? `
+      <tr class="${isToday?'ds-today':''}" style="background:var(--bg4)">
+        <td style="font-size:10px;color:var(--t3);white-space:nowrap;font-family:'DM Mono',monospace">+ New</td>
+        <td><input class="ds-inp" placeholder="Particular…" id="ds-part-${date}-${newRowIdx}"></td>
+        <td><select class="ds-sel" id="ds-doc-${date}-${newRowIdx}"><option value="YES">YES</option><option value="NO">NO</option></select></td>
+        <td><input class="ds-url-inp" placeholder="Drive URL…" id="ds-url-${date}-${newRowIdx}"></td>
+        <td><input class="ds-inp" placeholder="Bill / MF / GC No…" id="ds-ref-${date}-${newRowIdx}"></td>
+        <td><input class="ds-inp" placeholder="Remarks…" id="ds-rem-${date}-${newRowIdx}"></td>
+        <td><input class="ds-inp amount" placeholder="Amount" type="text" inputmode="decimal" id="ds-amt-${date}-${newRowIdx}" oninput="this.value=this.value.replace(/[^0-9.]/g,'')"></td>
+        <td><button class="ds-save-btn" onclick="saveDsRow('${date}',${newRowIdx})">Save</button></td>
+      </tr>` : '';
 
     return dateEntries.map((e,idx)=>`
       <tr class="${isToday?'ds-today':''}" id="ds-row-${e.id}">
@@ -3044,7 +3059,7 @@ function renderDaySheet(){
         <td style="white-space:nowrap;text-align:center">
           ${isSA?`<button class="ds-edit-btn" onclick="deleteDsRow(${e.id})" style="background:var(--red-bg);border-color:var(--red-bd);color:var(--red)">🗑 Delete</button>`:`<span class="ds-locked">🔒 Locked</span>`}
         </td>
-      </tr>`).join('');
+      </tr>`).join('') + newEntryRow;
   }).join('');
 
   el.innerHTML=`
@@ -3085,19 +3100,19 @@ async function loadDsForUser(uid){
   renderDaySheet();
 }
 
-async function saveDsRow(date){
-  const particular=document.getElementById('ds-part-'+date)?.value?.trim();
+async function saveDsRow(date, rowIdx=0){
+  const particular=document.getElementById(`ds-part-${date}-${rowIdx}`)?.value?.trim();
   if(!particular){ toast('Particular is required','er'); return; }
-  const amtRaw=document.getElementById('ds-amt-'+date)?.value?.trim();
+  const amtRaw=document.getElementById(`ds-amt-${date}-${rowIdx}`)?.value?.trim();
   const amount=amtRaw===''?0:parseFloat(amtRaw)||0;
   const payload={
     user_id:       CU.id,
     entry_date:    date,
     particular,
-    supported_doc: document.getElementById('ds-doc-'+date)?.value||'NO',
-    drive_link:    document.getElementById('ds-url-'+date)?.value?.trim()||'',
-    ref_numbers:   document.getElementById('ds-ref-'+date)?.value?.trim()||'',
-    remarks:       document.getElementById('ds-rem-'+date)?.value?.trim()||'',
+    supported_doc: document.getElementById(`ds-doc-${date}-${rowIdx}`)?.value||'NO',
+    drive_link:    document.getElementById(`ds-url-${date}-${rowIdx}`)?.value?.trim()||'',
+    ref_numbers:   document.getElementById(`ds-ref-${date}-${rowIdx}`)?.value?.trim()||'',
+    remarks:       document.getElementById(`ds-rem-${date}-${rowIdx}`)?.value?.trim()||'',
     amount,
     locked:        true
   };
